@@ -19,7 +19,11 @@ import androidx.camera.core.Camera
 import androidx.camera.lifecycle.ProcessCameraProvider
 import androidx.core.app.ActivityCompat
 import androidx.core.content.ContextCompat
+import androidx.core.util.valueIterator
 import androidx.lifecycle.LifecycleOwner
+import com.google.android.gms.vision.Frame
+import com.google.android.gms.vision.barcode.Barcode
+import com.google.android.gms.vision.barcode.BarcodeDetector
 import kotlinx.android.synthetic.main.activity_main.*
 import java.io.ByteArrayOutputStream
 import java.nio.ByteBuffer
@@ -41,6 +45,9 @@ class MainActivity : AppCompatActivity() {
     private var imageCapture: ImageCapture? = null
     private var camera: Camera? = null
     private var imageAnalyzer: ImageAnalysis? = null
+    private var barcodeValues: MutableMap<String, Int> = mutableMapOf()
+
+    private lateinit var detector: BarcodeDetector
 
     private val imageSavedCB =
         object : ImageCapture.OnImageSavedCallback {
@@ -71,10 +78,14 @@ class MainActivity : AppCompatActivity() {
 
         val yuvImage = YuvImage(nv21, ImageFormat.NV21, image.width, image.height, null)
         val out = ByteArrayOutputStream()
-        Log.d("konishi", "yuvImage.width:${yuvImage.width} yuvImage.height:${yuvImage.height}")
+        Log.d("konishi", "yuvImage.width:${image.width} yuvImage.height:${image.height}")
         yuvImage.compressToJpeg(Rect(0, 0, yuvImage.width, yuvImage.height), 100, out)
         val imageBytes = out.toByteArray()
-        return BitmapFactory.decodeByteArray(imageBytes, 0, imageBytes.size)
+        var bmp = BitmapFactory.decodeByteArray(imageBytes, 0, imageBytes.size)
+
+        var mat:Matrix = Matrix()
+        mat.postRotate(90.0f)
+        return Bitmap.createBitmap(bmp, 0, 0, bmp.width, bmp.height, mat, true)
     }
 
     private val imageAnalizer = object : ImageAnalysis.Analyzer {
@@ -85,26 +96,20 @@ class MainActivity : AppCompatActivity() {
             val imageHeight = imageProxy.height
 
             //imageをビットマップに変換する
-            var bitmap = imageProxy.image?.let { toBitmap(it) }
+            var dispBitmap = imageProxy.image?.let { toBitmap(it) }
 
             //ここでbitmapに何か書き込みたい
             var paint = Paint()
             paint.setColor(Color.RED)
             paint.style = Paint.Style.STROKE
 
-            try{
-                var auxBitmap = Bitmap.createBitmap(imageHeight, imageWidth, Bitmap.Config.ARGB_8888)
-                var canvas = auxBitmap?.let { Canvas(it) }
-                Log.d("konishi", "rect: width:${imageHeight} height:${imageWidth}")
-                canvas?.drawRect(Rect(0,0, 1080/2, 1920/2), paint)
-                imageView.setImageBitmap(auxBitmap)
-            }
-            catch(e:java.lang.Exception) {
-                Log.d("konishi", e.message)
+            //var dispBitmap = originalBitmap?.copy(Bitmap.Config.ARGB_8888, true)
+            dispBitmap?.let {
+                val r = barcodeDetect(it)
+                    imageView.setImageBitmap(it)
             }
 
-            bitmap?.also { Log.d("konishi", "bitmap not null") }
-            Log.d("konishi", "format ${format} width: ${imageWidth} height:${imageHeight}")
+            Log.d("konishi", "format ${format} width: ${dispBitmap?.width} height:${dispBitmap?.height}")
 
 
             imageProxy.close()   //closeを呼び出すと次のフレームを取得する
@@ -120,6 +125,24 @@ class MainActivity : AppCompatActivity() {
         }
 
         setContentView(R.layout.activity_main)
+
+        //バーコード読み取りのインスタンス作成
+        //ここでチェックディジット追加できるか調べる
+        detector = BarcodeDetector.Builder(applicationContext)
+            .setBarcodeFormats(
+                        Barcode.EAN_13 or
+                        Barcode.EAN_8 or
+                        Barcode.ITF or
+                        Barcode.CODE_128 or
+                        Barcode.CODE_93 or
+                        Barcode.CODE_39 or
+                        Barcode.CODABAR
+            )
+            .build()
+        if (!detector.isOperational) {
+            Log.d("konishi", "error init barcode detector")
+        }
+
 
         appExecutor = ContextCompat.getMainExecutor(applicationContext)
 
@@ -152,7 +175,7 @@ class MainActivity : AppCompatActivity() {
             val cameraProvider =
                 cameraProvider.get()
 
-            val size:Size = Size(1080, 1920)
+            val size:Size = Size(720, 1280)
             preview = Preview.Builder()
                 //.setTargetAspectRatio(AspectRatio.RATIO_16_9)
                 .setTargetRotation(Surface.ROTATION_0)
@@ -204,6 +227,67 @@ class MainActivity : AppCompatActivity() {
                     Toast.LENGTH_SHORT).show()
             }
         }
+    }
+
+    private fun barcodeDetect(bitmap: Bitmap): Bitmap? {
+
+
+        val frame = Frame.Builder().setBitmap(bitmap).build()
+        val barcodes = detector.detect(frame)
+
+        var paint = Paint()
+        paint.strokeWidth = 6.0f
+        paint.style = Paint.Style.STROKE
+
+        var fontPaint = Paint()
+        fontPaint.strokeWidth = 1.0f
+        fontPaint.textSize = 40.0f
+
+        val c = Canvas(bitmap)
+        for (r in barcodes.valueIterator()) {
+            val rect = r.boundingBox
+            val value = r.rawValue
+            if(barcodeValues.contains(value)) {
+                // 既に存在している
+               var v = 0
+                barcodeValues[value]?.let {
+                    v = it
+                }
+                barcodeValues[value] = v + 1
+            }
+            else {
+                paint.setColor(Color.argb(255, 255, 0, 0))
+                fontPaint.setColor(Color.argb(255, 255, 0, 0))
+                barcodeValues[value] = 1
+            }
+            var barcodeCount = barcodeValues[value]
+            var color:Int = Color.argb(255, 0, 255, 0)
+            barcodeCount?.let {
+                if(it == 1) {
+                    color = Color.argb(255, 255, 0, 0)
+                }
+                else if(it < 5) {
+                    color = Color.argb(255, 255, 255, 0)
+                }
+            }
+
+            paint.setColor(color)
+            fontPaint.setColor(color)
+            c.drawRect(rect, paint)
+            c.drawText("${value}", rect.left.toFloat(), rect.top.toFloat(), fontPaint)
+        }
+        var count = barcodeValues.count()
+        paint.setColor(Color.argb(255, 0, 255, 255))
+        paint.strokeWidth = 1.0f
+        paint.textSize = 20.0f
+        paint.style = Paint.Style.FILL
+        c.drawText("${count}", 10.0f, 100.0f, paint)
+        Log.d("barcode", "========================")
+        barcodeValues.forEach {
+            Log.d("barcode", "barcode:${it.key} count:${it.value}")
+        }
+
+        return bitmap
     }
 
     companion object {
